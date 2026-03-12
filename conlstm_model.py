@@ -26,7 +26,10 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCh
 from tensorflow.keras.optimizers import Adam
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import (
+    mean_squared_error, mean_absolute_error, r2_score,
+    confusion_matrix, classification_report
+)
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -49,6 +52,12 @@ RANDOM_SEED = 42
 
 np.random.seed(RANDOM_SEED)
 tf.random.set_seed(RANDOM_SEED)
+
+# Severity classification thresholds (configurable)
+# Labels: 0 = Low, 1 = Mild, 2 = High
+SEVERITY_LOW_THRESHOLD = 0.33    # value < 0.33  → Low
+SEVERITY_MILD_THRESHOLD = 0.66   # 0.33 ≤ value < 0.66 → Mild; ≥ 0.66 → High
+SEVERITY_LABELS = ["Low", "Mild", "High"]
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +494,180 @@ def plot_prediction_comparison(
 
 
 # ---------------------------------------------------------------------------
+# Severity Classification
+# ---------------------------------------------------------------------------
+
+def continuous_to_severity(
+    values: np.ndarray,
+    low_threshold: float = SEVERITY_LOW_THRESHOLD,
+    mild_threshold: float = SEVERITY_MILD_THRESHOLD
+) -> np.ndarray:
+    """
+    Convert continuous prediction values (0–1) to discrete severity labels.
+
+    Parameters
+    ----------
+    values        : np.ndarray of any shape, values in [0, 1]
+    low_threshold : upper bound (exclusive) for the *Low* class
+    mild_threshold: upper bound (exclusive) for the *Mild* class
+
+    Returns
+    -------
+    np.ndarray of int8 with same shape as *values*
+        0 → Low   (value < low_threshold)
+        1 → Mild  (low_threshold ≤ value < mild_threshold)
+        2 → High  (value ≥ mild_threshold)
+    """
+    labels = np.zeros(values.shape, dtype=np.int8)
+    labels[values >= low_threshold] = 1
+    labels[values >= mild_threshold] = 2
+    return labels
+
+
+def evaluate_classification(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    low_threshold: float = SEVERITY_LOW_THRESHOLD,
+    mild_threshold: float = SEVERITY_MILD_THRESHOLD,
+    channel_names: list = None
+) -> dict:
+    """
+    Evaluate severity-level classification performance from continuous predictions.
+
+    For each channel the function:
+      1. Converts both *y_true* and *y_pred* to severity labels
+         (0 = Low, 1 = Mild, 2 = High) using the supplied thresholds.
+      2. Prints the confusion matrix and a full classification report
+         (precision, recall, F1-score) for that channel.
+
+    Parameters
+    ----------
+    y_true         : np.ndarray  shape (N, pred_len, H, W, C)
+    y_pred         : np.ndarray  shape (N, pred_len, H, W, C)
+    low_threshold  : upper bound (exclusive) for the Low class
+    mild_threshold : upper bound (exclusive) for the Mild class
+    channel_names  : list of channel labels (length must equal C)
+
+    Returns
+    -------
+    dict  keyed by channel name, each value is a dict with:
+          'confusion_matrix' and 'classification_report' (as string).
+    """
+    if channel_names is None:
+        channel_names = ["Rainfall", "Temperature", "Disaster Index"]
+
+    n_channels = y_true.shape[-1]
+    results = {}
+
+    print("\n" + "=" * 60)
+    print("  Severity Classification Evaluation")
+    print(f"  Thresholds — Low: < {low_threshold}  |  "
+          f"Mild: {low_threshold}–{mild_threshold}  |  "
+          f"High: ≥ {mild_threshold}")
+    print("=" * 60)
+
+    for c in range(n_channels):
+        name = channel_names[c] if c < len(channel_names) else f"Channel {c}"
+
+        # Extract and flatten the spatial/temporal dimensions for this channel
+        true_c = y_true[..., c].ravel()   # shape: (N * pred_len * H * W,)
+        pred_c = y_pred[..., c].ravel()
+
+        true_labels = continuous_to_severity(true_c, low_threshold, mild_threshold)
+        pred_labels = continuous_to_severity(pred_c, low_threshold, mild_threshold)
+
+        cm = confusion_matrix(true_labels, pred_labels, labels=[0, 1, 2])
+        report = classification_report(
+            true_labels, pred_labels,
+            labels=[0, 1, 2],
+            target_names=SEVERITY_LABELS,
+            zero_division=0
+        )
+
+        print(f"\n--- Channel: {name} ---")
+        print("Confusion Matrix (rows = True, cols = Predicted):")
+        header = "          " + "  ".join(f"{s:>6}" for s in SEVERITY_LABELS)
+        print(header)
+        for i, row in enumerate(cm):
+            row_str = "  ".join(f"{v:>6d}" for v in row)
+            print(f"  {SEVERITY_LABELS[i]:>6}  {row_str}")
+        print("\nClassification Report:")
+        print(report)
+
+        results[name] = {
+            "confusion_matrix": cm,
+            "classification_report": report,
+        }
+
+    return results
+
+
+def plot_categorical_prediction(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_idx: int = 0,
+    low_threshold: float = SEVERITY_LOW_THRESHOLD,
+    mild_threshold: float = SEVERITY_MILD_THRESHOLD,
+    channel_names: list = None
+) -> None:
+    """
+    Visualise ground-truth and predicted severity zones with a discrete
+    three-colour map (Green = Low, Yellow = Mild, Red = High).
+
+    Parameters
+    ----------
+    y_true        : (N, pred_len, H, W, C)
+    y_pred        : (N, pred_len, H, W, C)
+    sample_idx    : which test sample to visualise
+    low_threshold : upper bound (exclusive) for the Low class
+    mild_threshold: upper bound (exclusive) for the Mild class
+    channel_names : labels for each feature channel
+    """
+    if channel_names is None:
+        channel_names = ["Rainfall", "Temperature", "Disaster Index"]
+
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    cmap = ListedColormap(["green", "yellow", "red"])
+    norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], ncolors=3)
+
+    n_channels = y_true.shape[-1]
+    fig, axes = plt.subplots(n_channels, 2, figsize=(10, 4 * n_channels))
+
+    for c in range(n_channels):
+        name = channel_names[c] if c < len(channel_names) else f"Channel {c}"
+
+        true_map = continuous_to_severity(
+            y_true[sample_idx, -1, :, :, c], low_threshold, mild_threshold
+        )
+        pred_map = continuous_to_severity(
+            y_pred[sample_idx, -1, :, :, c], low_threshold, mild_threshold
+        )
+
+        im = axes[c, 0].imshow(true_map, cmap=cmap, norm=norm)
+        axes[c, 0].set_title(f"Ground Truth – {name}")
+        axes[c, 0].axis("off")
+        cbar = plt.colorbar(im, ax=axes[c, 0], ticks=[0, 1, 2])
+        cbar.ax.set_yticklabels(SEVERITY_LABELS)
+
+        im = axes[c, 1].imshow(pred_map, cmap=cmap, norm=norm)
+        axes[c, 1].set_title(f"Predicted – {name}")
+        axes[c, 1].axis("off")
+        cbar = plt.colorbar(im, ax=axes[c, 1], ticks=[0, 1, 2])
+        cbar.ax.set_yticklabels(SEVERITY_LABELS)
+
+    plt.suptitle(
+        f"Severity Zone Comparison (sample {sample_idx})\n"
+        "■ Green = Low  ■ Yellow = Mild  ■ Red = High",
+        fontsize=12
+    )
+    plt.tight_layout()
+    plt.savefig("severity_prediction.png", dpi=150)
+    plt.show()
+    print("Severity prediction plot saved to 'severity_prediction.png'")
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -494,24 +677,24 @@ def main():
     print("=" * 60)
 
     # 1. Generate / load data
-    print("\n[1/5] Generating synthetic Indian disaster data …")
+    print("\n[1/6] Generating synthetic Indian disaster data …")
     data = generate_synthetic_disaster_data(n_samples=500)
     print(f"  Data shape: {data.shape}  (timesteps, H, W, channels)")
 
     # 2. Prepare sequences
-    print("\n[2/5] Preparing train/test sequences …")
+    print("\n[2/6] Preparing train/test sequences …")
     X_train, X_test, y_train, y_test, scalers = prepare_dataset(data)
     print(f"  X_train: {X_train.shape} | X_test: {X_test.shape}")
     print(f"  y_train: {y_train.shape} | y_test: {y_test.shape}")
 
     # 3. Build model
-    print("\n[3/5] Building ConvLSTM model …")
+    print("\n[3/6] Building ConvLSTM model …")
     input_shape = X_train.shape[1:]   # (seq_len, H, W, C)
     model = build_conlstm_model(input_shape)
     model.summary()
 
     # 4. Train
-    print("\n[4/5] Training …")
+    print("\n[4/6] Training …")
     val_split = int(len(X_train) * 0.8)
     X_tr, X_val = X_train[:val_split], X_train[val_split:]
     y_tr, y_val = y_train[:val_split], y_train[val_split:]
@@ -522,9 +705,14 @@ def main():
     # 5. Evaluate and visualise
     # evaluate_model returns both metrics and predictions so that a second
     # model.predict call is not needed for the visualisation step.
-    print("\n[5/5] Evaluating on test set …")
+    print("\n[5/6] Evaluating on test set …")
     metrics, y_pred = evaluate_model(model, X_test, y_test)
     plot_prediction_comparison(y_test, y_pred, sample_idx=0)
+
+    # 6. Severity classification evaluation
+    print("\n[6/6] Severity classification (Low / Mild / High) …")
+    evaluate_classification(y_test, y_pred)
+    plot_categorical_prediction(y_test, y_pred, sample_idx=0)
 
     print("\nDone! Model and plots saved.")
     return model, history, metrics
