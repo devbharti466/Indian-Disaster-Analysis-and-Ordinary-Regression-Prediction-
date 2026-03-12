@@ -42,8 +42,8 @@ GRID_WIDTH = 20           # Longitude grid cells (approx. 68°E–97°E)
 N_CHANNELS = 3            # Feature channels: rainfall, temperature, disaster_index
 SEQ_LEN = 12              # Look-back window: 12 time steps (e.g., 12 months)
 PRED_LEN = 1              # Predict 1 step ahead
-BATCH_SIZE = 16
-EPOCHS = 50
+BATCH_SIZE = 32
+EPOCHS = 100
 LEARNING_RATE = 1e-3
 RANDOM_SEED = 42
 
@@ -196,7 +196,7 @@ def prepare_dataset(data: np.ndarray, train_ratio: float = 0.8):
 def build_conlstm_model(
     input_shape: tuple,
     pred_len: int = PRED_LEN,
-    filters: int = 32,
+    filters: int = 64,
     kernel_size: tuple = (3, 3),
     dropout_rate: float = 0.2
 ) -> Model:
